@@ -11,12 +11,15 @@ set -euo pipefail
 #   - Interactive menu with gum
 # ─────────────────────────────────────────────────────────────────────────────
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 TOOL_NAME="claude-multi"
 CLAUDE_HOME="$HOME/.claude"
 PROFILE_PREFIX="$HOME/.claude-"
 PROFILE_MARKER=".claude-multi-profile"
 SHARED_ITEMS="skills plugins settings.json CLAUDE.md"
+USAGE_DIR="$HOME/.claude-multi"
+USAGE_FILE="$USAGE_DIR/usage.json"
+HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)/hooks"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -352,6 +355,353 @@ cmd_share() {
     echo ""
 }
 
+# ── Usage Monitoring ─────────────────────────────────────────────────────
+
+cmd_setup_hooks() {
+    echo ""
+    info "Setting up usage tracking hooks..."
+
+    # Find the hook script
+    local hook_script=""
+    if [ -f "$HOOKS_DIR/usage-tracker.py" ]; then
+        hook_script="$HOOKS_DIR/usage-tracker.py"
+    elif [ -f "$HOME/.local/share/claude-multi/hooks/usage-tracker.py" ]; then
+        hook_script="$HOME/.local/share/claude-multi/hooks/usage-tracker.py"
+    else
+        error "Hook script not found. Reinstall claude-multi."
+    fi
+
+    # Create usage directory
+    mkdir -p "$USAGE_DIR"
+
+    # Install hook into default ~/.claude/settings.json
+    local settings_file="$CLAUDE_HOME/settings.json"
+
+    if [ ! -f "$settings_file" ]; then
+        echo '{}' > "$settings_file"
+    fi
+
+    # Check if hook already exists
+    if grep -q "usage-tracker" "$settings_file" 2>/dev/null; then
+        success "Usage hook already installed in settings.json"
+        echo ""
+        return
+    fi
+
+    # Use python to safely merge the hook into settings.json
+    python3 -c "
+import json, sys
+
+settings_path = '$settings_file'
+hook_command = 'python3 $hook_script'
+
+with open(settings_path, 'r') as f:
+    settings = json.load(f)
+
+if 'hooks' not in settings:
+    settings['hooks'] = {}
+
+if 'Stop' not in settings['hooks']:
+    settings['hooks']['Stop'] = []
+
+# Claude Code hook format: matcher + hooks array
+settings['hooks']['Stop'].append({
+    'matcher': '',
+    'hooks': [
+        {
+            'type': 'command',
+            'command': hook_command
+        }
+    ]
+})
+
+with open(settings_path, 'w') as f:
+    json.dump(settings, f, indent=2)
+
+print('ok')
+" && success "Usage hook installed in $settings_file" || error "Failed to install hook"
+
+    echo ""
+    info "Hook will track real token usage after every Claude response."
+    info "Run ${CYAN}$TOOL_NAME monitor${RESET} to see live usage."
+    echo ""
+}
+
+cmd_remove_hooks() {
+    echo ""
+    info "Removing usage tracking hooks..."
+
+    local settings_file="$CLAUDE_HOME/settings.json"
+
+    if [ ! -f "$settings_file" ]; then
+        warn "No settings file found."
+        return
+    fi
+
+    python3 -c "
+import json
+
+settings_path = '$settings_file'
+
+with open(settings_path, 'r') as f:
+    settings = json.load(f)
+
+if 'hooks' in settings and 'Stop' in settings['hooks']:
+    # Filter out any entry containing usage-tracker in nested hooks
+    new_stop = []
+    for entry in settings['hooks']['Stop']:
+        inner = entry.get('hooks', [])
+        filtered = [h for h in inner if 'usage-tracker' not in h.get('command', '')]
+        if filtered:
+            entry['hooks'] = filtered
+            new_stop.append(entry)
+    settings['hooks']['Stop'] = new_stop
+    if not settings['hooks']['Stop']:
+        del settings['hooks']['Stop']
+    if not settings['hooks']:
+        del settings['hooks']
+
+with open(settings_path, 'w') as f:
+    json.dump(settings, f, indent=2)
+
+print('ok')
+" && success "Usage hook removed." || error "Failed to remove hook"
+    echo ""
+}
+
+cmd_setup_statusline() {
+    echo ""
+    info "Setting up usage status line..."
+
+    # Find the statusline script
+    local sl_script=""
+    if [ -f "$HOOKS_DIR/usage-statusline.sh" ]; then
+        sl_script="$HOOKS_DIR/usage-statusline.sh"
+    elif [ -f "$HOME/.local/share/claude-multi/hooks/usage-statusline.sh" ]; then
+        sl_script="$HOME/.local/share/claude-multi/hooks/usage-statusline.sh"
+    else
+        error "Statusline script not found. Reinstall claude-multi."
+    fi
+
+    # Check jq dependency
+    if ! command -v jq >/dev/null 2>&1; then
+        warn "jq is required for the status line."
+        if command -v brew >/dev/null 2>&1; then
+            info "Installing via Homebrew..."
+            brew install jq
+        else
+            error "Install jq first: brew install jq"
+        fi
+    fi
+
+    local settings_file="$CLAUDE_HOME/settings.json"
+    if [ ! -f "$settings_file" ]; then
+        echo '{}' > "$settings_file"
+    fi
+
+    # Check if statusline already exists
+    if grep -q "usage-statusline" "$settings_file" 2>/dev/null; then
+        success "Status line already configured."
+        echo ""
+        return
+    fi
+
+    python3 -c "
+import json
+
+settings_path = '$settings_file'
+sl_command = 'bash $sl_script'
+
+with open(settings_path, 'r') as f:
+    settings = json.load(f)
+
+settings['statusLine'] = {
+    'type': 'command',
+    'command': sl_command,
+    'refreshInterval': 10
+}
+
+with open(settings_path, 'w') as f:
+    json.dump(settings, f, indent=2)
+
+print('ok')
+" && success "Status line configured in $settings_file" || error "Failed to configure status line"
+
+    echo ""
+    info "You'll see real-time usage at the bottom of Claude Code:"
+    dim "work Opus | ██░░░░░░░░ 15% reset 4:30PM | Wk: 48% | Ctx: 35%"
+    echo ""
+    info "Restart Claude Code to activate."
+    echo ""
+}
+
+cmd_remove_statusline() {
+    echo ""
+    info "Removing status line..."
+
+    local settings_file="$CLAUDE_HOME/settings.json"
+    if [ ! -f "$settings_file" ]; then
+        warn "No settings file found."
+        return
+    fi
+
+    python3 -c "
+import json
+
+settings_path = '$settings_file'
+
+with open(settings_path, 'r') as f:
+    settings = json.load(f)
+
+if 'statusLine' in settings:
+    del settings['statusLine']
+
+with open(settings_path, 'w') as f:
+    json.dump(settings, f, indent=2)
+
+print('ok')
+" && success "Status line removed." || error "Failed to remove"
+    echo ""
+}
+
+cmd_setup() {
+    echo ""
+    print_header
+    info "Running full setup..."
+    echo ""
+    cmd_setup_hooks
+    cmd_setup_statusline
+    success "All done! Restart Claude Code to see the status line."
+    echo ""
+}
+
+cmd_monitor() {
+    if [ ! -f "$USAGE_FILE" ]; then
+        echo ""
+        warn "No usage data yet."
+        info "Run ${CYAN}$TOOL_NAME setup-hooks${RESET} first to start tracking."
+        echo ""
+        return
+    fi
+
+    local watch_mode="${1:-}"
+
+    if [ "$watch_mode" = "--watch" ] || [ "$watch_mode" = "-w" ]; then
+        # Live auto-refresh mode
+        while true; do
+            clear
+            render_monitor
+            sleep 10
+        done
+    else
+        render_monitor
+    fi
+}
+
+render_monitor() {
+    local now
+    now=$(date +%s)
+
+    echo ""
+    if command -v gum >/dev/null 2>&1; then
+        gum style \
+            --border rounded \
+            --border-foreground 39 \
+            --padding "0 2" \
+            --margin "0 1" \
+            --align center \
+            "$(gum style --bold --foreground 39 'USAGE MONITOR')" \
+            "$(gum style --faint "real token data · 5h rolling window")"
+    else
+        printf "  ${BOLD}USAGE MONITOR${RESET}\n"
+        printf "  ${DIM}real token data · 5h rolling window${RESET}\n"
+    fi
+    echo ""
+
+    # Parse usage data with python
+    python3 -c "
+import json, time, sys
+from datetime import datetime, timezone
+
+now = time.time()
+window = 5 * 60 * 60
+
+with open('$USAGE_FILE', 'r') as f:
+    data = json.load(f)
+
+profiles = data.get('profiles', {})
+if not profiles:
+    print('  No profiles tracked yet.')
+    sys.exit(0)
+
+# Colors
+GREEN = '\033[0;32m'
+YELLOW = '\033[0;33m'
+RED = '\033[0;31m'
+CYAN = '\033[0;36m'
+BOLD = '\033[1m'
+DIM = '\033[2m'
+RESET = '\033[0m'
+
+for name, pdata in sorted(profiles.items()):
+    entries = [e for e in pdata.get('entries', []) if e.get('recorded_at', 0) > now - window]
+
+    input_t = sum(e.get('input_tokens', 0) for e in entries)
+    output_t = sum(e.get('output_tokens', 0) for e in entries)
+    cache_read = sum(e.get('cache_read_input_tokens', 0) for e in entries)
+    cache_create = sum(e.get('cache_creation_input_tokens', 0) for e in entries)
+    total_tokens = input_t + output_t + cache_read + cache_create
+    msg_count = len(entries)
+    model = pdata.get('last_model', 'unknown')
+
+    # Reset time
+    resets_at = pdata.get('window_resets_at', now)
+    if entries:
+        oldest = min(e.get('recorded_at', now) for e in entries)
+        resets_at = oldest + window
+
+    remaining = max(0, resets_at - now)
+    hours = int(remaining // 3600)
+    minutes = int((remaining % 3600) // 60)
+
+    # Usage bar (estimate based on common Max limits ~45M tokens/5h)
+    # User can override this, but 45M is a reasonable default
+    estimated_limit = 45_000_000
+    pct = min(100, int((total_tokens / estimated_limit) * 100)) if estimated_limit > 0 else 0
+
+    # Color based on usage
+    if pct < 50:
+        bar_color = GREEN
+    elif pct < 80:
+        bar_color = YELLOW
+    else:
+        bar_color = RED
+
+    filled = int(pct / 5)
+    empty = 20 - filled
+    bar = f'{bar_color}{\"█\" * filled}{DIM}{\"░\" * empty}{RESET}'
+
+    # Format tokens
+    def fmt(n):
+        if n >= 1_000_000:
+            return f'{n/1_000_000:.1f}M'
+        elif n >= 1_000:
+            return f'{n/1_000:.1f}K'
+        return str(n)
+
+    print(f'  {BOLD}{name}{RESET}  {DIM}({model}){RESET}')
+    print(f'  {bar}  {pct}%')
+    print(f'  {CYAN}Messages:{RESET} {msg_count}   {CYAN}Tokens:{RESET} {fmt(total_tokens)}   {CYAN}Output:{RESET} {fmt(output_t)}')
+    print(f'  {CYAN}Cache read:{RESET} {fmt(cache_read)}   {CYAN}Cache create:{RESET} {fmt(cache_create)}')
+    print(f'  {CYAN}Window resets in:{RESET} {hours}h {minutes}m')
+    print()
+
+print(f'  {DIM}Last updated: {datetime.now().strftime(\"%H:%M:%S\")}{RESET}')
+print(f'  {DIM}Run with --watch for live refresh{RESET}')
+"
+    echo ""
+}
+
 cmd_help() {
     print_header
     printf "  ${BOLD}USAGE${RESET}\n"
@@ -364,6 +714,12 @@ cmd_help() {
     printf "    ${CYAN}delete${RESET} ${DIM}[name]${RESET}       Delete a profile\n"
     printf "    ${CYAN}share${RESET} ${DIM}[name]${RESET}        Enable session sharing for a profile\n"
     printf "    ${CYAN}status${RESET}             Show active Claude sessions\n"
+    printf "    ${CYAN}monitor${RESET} ${DIM}[-w]${RESET}       Show real-time token usage dashboard\n"
+    printf "    ${CYAN}setup${RESET}              Install status line + usage hooks (one-time)\n"
+    printf "    ${CYAN}setup-hooks${RESET}        Install usage tracking hook only\n"
+    printf "    ${CYAN}setup-statusline${RESET}   Install status line only\n"
+    printf "    ${CYAN}remove-hooks${RESET}       Remove usage tracking hook\n"
+    printf "    ${CYAN}remove-statusline${RESET}  Remove status line\n"
     printf "    ${CYAN}help${RESET}               Show this help\n"
     printf "    ${CYAN}version${RESET}            Show version\n\n"
 
@@ -373,7 +729,7 @@ cmd_help() {
     printf "    ${DIM}$TOOL_NAME work -c${RESET}               Continue latest work session\n"
     printf "    ${DIM}$TOOL_NAME personal -p \"fix bug\"${RESET}  Print mode on personal\n"
     printf "    ${DIM}$TOOL_NAME create work${RESET}            Create work profile\n"
-    printf "    ${DIM}$TOOL_NAME list${RESET}                   Show all profiles\n\n"
+    printf "    ${DIM}$TOOL_NAME monitor -w${RESET}             Live usage dashboard\n\n"
 
     printf "  ${BOLD}WHEN YOU HIT THE LIMIT${RESET}\n"
     printf "    ${DIM}1. Exit current session (Ctrl+D)${RESET}\n"
@@ -399,6 +755,12 @@ main() {
         delete|rm|remove)    shift; cmd_delete "$@" ;;
         share)               shift; cmd_share "$@" ;;
         status|ps)           shift; cmd_status "$@" ;;
+        monitor)             shift; cmd_monitor "$@" ;;
+        setup)               shift; cmd_setup "$@" ;;
+        setup-hooks)         shift; cmd_setup_hooks "$@" ;;
+        setup-statusline)    shift; cmd_setup_statusline "$@" ;;
+        remove-hooks)        shift; cmd_remove_hooks "$@" ;;
+        remove-statusline)   shift; cmd_remove_statusline "$@" ;;
         launch|run|start)    shift; cmd_launch "$@" ;;
         help|-h|--help)      cmd_help ;;
         version|-v|--version) echo "$TOOL_NAME v$VERSION" ;;
@@ -410,15 +772,19 @@ main() {
                 "Launch a profile" \
                 "Create a profile" \
                 "List profiles" \
-                "Delete a profile" \
+                "Usage monitor" \
+                "Setup usage hooks" \
                 "Show active sessions" \
+                "Delete a profile" \
                 "Exit")
             case "$action" in
                 "Launch a profile")      cmd_launch ;;
                 "Create a profile")      cmd_create ;;
                 "List profiles")         cmd_list ;;
-                "Delete a profile")      cmd_delete ;;
+                "Usage monitor")         cmd_monitor ;;
+                "Setup usage hooks")     cmd_setup_hooks ;;
                 "Show active sessions")  cmd_status ;;
+                "Delete a profile")      cmd_delete ;;
                 "Exit"|"")               exit 0 ;;
             esac
             ;;

@@ -43,6 +43,21 @@ install() {
     chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
     success "Installed to ${INSTALL_DIR}/${BINARY_NAME}"
 
+    # Download hooks
+    local hooks_dir="$HOME/.local/share/claude-multi/hooks"
+    mkdir -p "$hooks_dir"
+
+    info "Downloading hooks..."
+    for hook in usage-tracker.py usage-statusline.sh; do
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/hooks/${hook}" -o "${hooks_dir}/${hook}"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO "${hooks_dir}/${hook}" "https://raw.githubusercontent.com/${REPO}/main/hooks/${hook}"
+        fi
+        chmod +x "${hooks_dir}/${hook}"
+    done
+    success "Hooks installed to ${hooks_dir}"
+
     # Check PATH
     if ! echo "$PATH" | tr ':' '\n' | grep -q "^${INSTALL_DIR}$"; then
         warn "${INSTALL_DIR} is not in your PATH."
@@ -78,13 +93,16 @@ install() {
     success "Installation complete!"
     echo ""
     printf "  ${BOLD}Quick start:${RESET}\n"
-    printf "    ${CYAN}claude-multi create work${RESET}         ${DIM}# create a profile${RESET}\n"
-    printf "    ${CYAN}claude-multi work${RESET}                ${DIM}# launch (first time: /login)${RESET}\n"
-    printf "    ${CYAN}claude-multi work -r${RESET}             ${DIM}# resume a session${RESET}\n"
-    printf "    ${CYAN}claude-multi${RESET}                     ${DIM}# interactive menu${RESET}\n"
+    printf "    ${CYAN}claude-multi setup${RESET}                ${DIM}# install status line + hooks${RESET}\n"
+    printf "    ${CYAN}claude-multi create work${RESET}          ${DIM}# create a profile${RESET}\n"
+    printf "    ${CYAN}claude-multi work${RESET}                 ${DIM}# launch (first time: /login)${RESET}\n"
+    printf "    ${CYAN}claude-multi work -r${RESET}              ${DIM}# resume a session${RESET}\n"
+    printf "    ${CYAN}claude-multi${RESET}                      ${DIM}# interactive menu${RESET}\n"
     echo ""
-    printf "  ${BOLD}Key feature:${RESET} Sessions auto-shared across all profiles.\n"
-    printf "  ${DIM}  Hit your limit? Switch profile, resume the same session.${RESET}\n"
+    printf "  ${BOLD}Key features:${RESET}\n"
+    printf "  ${DIM}  - Real-time usage status line (session %, weekly %, context)${RESET}\n"
+    printf "  ${DIM}  - Shared sessions across profiles${RESET}\n"
+    printf "  ${DIM}  - Hit your limit? Switch profile, resume the same session${RESET}\n"
     echo ""
 }
 
