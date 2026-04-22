@@ -5,7 +5,7 @@ set -euo pipefail
 # claude-multi installer
 # ─────────────────────────────────────────────────────────────────────────────
 
-REPO="hemilpatel/claude-multi"
+REPO="Hemil4/claude-multi"
 INSTALL_DIR="$HOME/.local/bin"
 BINARY_NAME="claude-multi"
 
