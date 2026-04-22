@@ -1,0 +1,436 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─────────────────────────────────────────────────────────────────────────────
+# claude-multi — Run multiple Claude Code accounts in parallel
+#
+# Features over claude-switch:
+#   - Full flag forwarding (-r, -c, -p, etc.)
+#   - Auto-shared sessions across all profiles
+#   - Parallel accounts with isolated credentials
+#   - Interactive menu with gum
+# ─────────────────────────────────────────────────────────────────────────────
+
+VERSION="1.0.0"
+TOOL_NAME="claude-multi"
+CLAUDE_HOME="$HOME/.claude"
+PROFILE_PREFIX="$HOME/.claude-"
+PROFILE_MARKER=".claude-multi-profile"
+SHARED_ITEMS="skills plugins settings.json CLAUDE.md"
+
+# ── Colors ───────────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+info()    { printf "  ${CYAN}>${RESET} %s\n" "$1"; }
+success() { printf "  ${GREEN}✔${RESET} %s\n" "$1"; }
+warn()    { printf "  ${YELLOW}!${RESET} %s\n" "$1"; }
+error()   { printf "  ${RED}✘${RESET} %s\n" "$1"; exit 1; }
+dim()     { printf "  ${DIM}  %s${RESET}\n" "$1"; }
+
+profile_dir() { echo "${PROFILE_PREFIX}${1}"; }
+
+profile_exists() {
+    local dir
+    dir="$(profile_dir "$1")"
+    [ -d "$dir" ] && [ -f "$dir/$PROFILE_MARKER" ]
+}
+
+ensure_gum() {
+    if command -v gum >/dev/null 2>&1; then
+        return 0
+    fi
+    echo ""
+    warn "gum is required for interactive menus."
+    if command -v brew >/dev/null 2>&1; then
+        info "Installing via Homebrew..."
+        brew install gum
+    else
+        printf "  Install: ${CYAN}brew install gum${RESET}\n"
+        exit 1
+    fi
+}
+
+ensure_claude() {
+    if ! command -v claude >/dev/null 2>&1; then
+        error "Claude Code not found. Install it first: https://docs.anthropic.com/en/docs/claude-code"
+    fi
+}
+
+validate_name() {
+    local name="$1"
+    if [ -z "$name" ]; then
+        error "Profile name cannot be empty."
+    fi
+    if [ "$name" = "default" ]; then
+        error "'default' is reserved for ~/.claude/"
+    fi
+    if [[ "$name" =~ [^a-zA-Z0-9_-] ]]; then
+        error "Profile name can only contain letters, numbers, hyphens, and underscores."
+    fi
+}
+
+list_profiles() {
+    local found=0
+    for dir in "${PROFILE_PREFIX}"*/; do
+        [ -d "$dir" ] || continue
+        [ -f "$dir/$PROFILE_MARKER" ] || continue
+        basename "$dir" | sed "s/^\.claude-//"
+        found=1
+    done
+    if [ "$found" -eq 0 ]; then
+        return 1
+    fi
+}
+
+pick_profile() {
+    local action="${1:-select}"
+    ensure_gum
+
+    local profiles=()
+    while IFS= read -r p; do
+        profiles+=("$p")
+    done < <(list_profiles 2>/dev/null || true)
+
+    if [ ${#profiles[@]} -eq 0 ]; then
+        error "No profiles found. Create one: $TOOL_NAME create <name>"
+    fi
+
+    local chosen
+    chosen=$(printf '%s\n' "${profiles[@]}" | gum choose --header "  $action profile:")
+    echo "$chosen"
+}
+
+# ── Header ───────────────────────────────────────────────────────────────────
+
+print_header() {
+    echo ""
+    if command -v gum >/dev/null 2>&1; then
+        gum style \
+            --border double \
+            --border-foreground 39 \
+            --padding "1 3" \
+            --margin "0 2" \
+            --align center \
+            "$(gum style --bold --foreground 39 'C L A U D E   M U L T I')" \
+            "" \
+            "$(gum style --faint "v${VERSION}  ·  parallel accounts · shared sessions · full flag support")"
+    else
+        printf "  ${BOLD}CLAUDE MULTI${RESET} v${VERSION}\n"
+        printf "  ${DIM}parallel accounts · shared sessions · full flag support${RESET}\n"
+    fi
+    echo ""
+}
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_create() {
+    local name="${1:-}"
+
+    if [ -z "$name" ]; then
+        ensure_gum
+        name=$(gum input --placeholder "Profile name (e.g., work, personal)")
+    fi
+
+    validate_name "$name"
+
+    local dir
+    dir="$(profile_dir "$name")"
+
+    if profile_exists "$name"; then
+        error "Profile '$name' already exists."
+    fi
+
+    echo ""
+    info "Creating profile: ${BOLD}$name${RESET}"
+
+    # Create profile directory
+    mkdir -p "$dir"
+
+    # Drop marker file
+    echo "$name" > "$dir/$PROFILE_MARKER"
+
+    # Symlink shared config from default ~/.claude/
+    for item in $SHARED_ITEMS; do
+        local src="$CLAUDE_HOME/$item"
+        local dst="$dir/$item"
+        if [ -e "$src" ] && [ ! -e "$dst" ]; then
+            ln -s "$src" "$dst"
+            dim "Linked $item"
+        fi
+    done
+
+    # Symlink projects folder for shared sessions
+    if [ -d "$CLAUDE_HOME/projects" ]; then
+        if [ ! -e "$dir/projects" ]; then
+            ln -s "$CLAUDE_HOME/projects" "$dir/projects"
+            success "Sessions shared (symlinked projects/)"
+        fi
+    fi
+
+    # Create necessary directories
+    mkdir -p "$dir/cache" "$dir/sessions" "$dir/backups"
+
+    echo ""
+    success "Profile '${name}' created!"
+    echo ""
+    info "Next step — log in:"
+    dim "$TOOL_NAME $name"
+    dim "Then type /login inside Claude Code"
+    echo ""
+}
+
+cmd_list() {
+    print_header
+
+    local found=0
+    local profiles=()
+
+    while IFS= read -r name; do
+        profiles+=("$name")
+    done < <(list_profiles 2>/dev/null || true)
+
+    if [ ${#profiles[@]} -eq 0 ]; then
+        warn "No profiles yet."
+        dim "Create one: $TOOL_NAME create <name>"
+        echo ""
+        return
+    fi
+
+    printf "  ${BOLD}%-15s %-12s %-8s %s${RESET}\n" "PROFILE" "STATUS" "SHARED" "DIRECTORY"
+    printf "  ${DIM}%-15s %-12s %-8s %s${RESET}\n" "───────" "──────" "──────" "─────────"
+
+    for name in "${profiles[@]}"; do
+        local dir
+        dir="$(profile_dir "$name")"
+
+        # Check login status
+        local status="${RED}not logged in${RESET}"
+        if [ -f "$dir/.claude.json" ]; then
+            local size
+            size=$(wc -c < "$dir/.claude.json" | tr -d ' ')
+            if [ "$size" -gt 100 ]; then
+                status="${GREEN}logged in${RESET}"
+            fi
+        fi
+
+        # Check session sharing
+        local shared="${RED}no${RESET}"
+        if [ -L "$dir/projects" ]; then
+            shared="${GREEN}yes${RESET}"
+        fi
+
+        printf "  %-15s %-23s %-19s %s\n" "$name" "$status" "$shared" "$dir"
+        found=1
+    done
+
+    echo ""
+
+    if [ "$found" -eq 0 ]; then
+        warn "No profiles found."
+        dim "Create one: $TOOL_NAME create <name>"
+        echo ""
+    fi
+}
+
+cmd_delete() {
+    local name="${1:-}"
+
+    if [ -z "$name" ]; then
+        name=$(pick_profile "Delete") || exit 1
+    fi
+
+    validate_name "$name"
+
+    if ! profile_exists "$name"; then
+        error "Profile '$name' does not exist."
+    fi
+
+    local dir
+    dir="$(profile_dir "$name")"
+
+    echo ""
+    warn "This will delete profile '${name}' and its config at:"
+    dim "$dir"
+    echo ""
+
+    if command -v gum >/dev/null 2>&1; then
+        gum confirm "Delete profile '$name'?" || { info "Cancelled."; exit 0; }
+    else
+        printf "  Delete? [y/N] "
+        read -r confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || { info "Cancelled."; exit 0; }
+    fi
+
+    rm -rf "$dir"
+    echo ""
+    success "Profile '$name' deleted."
+    echo ""
+}
+
+cmd_launch() {
+    local name="${1:-}"
+
+    if [ -z "$name" ]; then
+        name=$(pick_profile "Launch") || exit 1
+    fi
+
+    if ! profile_exists "$name"; then
+        error "Profile '$name' does not exist. Create it: $TOOL_NAME create $name"
+    fi
+
+    ensure_claude
+
+    local dir
+    dir="$(profile_dir "$name")"
+
+    # Remove profile name from args, keep everything else (flags like -r, -c, -p)
+    shift || true
+
+    exec env CLAUDE_CONFIG_DIR="$dir" claude "$@"
+}
+
+cmd_status() {
+    echo ""
+    info "Checking active Claude processes..."
+    echo ""
+
+    local count=0
+    while IFS= read -r line; do
+        if [ -n "$line" ]; then
+            printf "  %s\n" "$line"
+            count=$((count + 1))
+        fi
+    done < <(ps aux | grep -E "CLAUDE_CONFIG_DIR.*claude" | grep -v grep || true)
+
+    if [ "$count" -eq 0 ]; then
+        dim "No active Claude sessions found."
+    else
+        echo ""
+        success "$count active session(s)"
+    fi
+    echo ""
+}
+
+cmd_share() {
+    local name="${1:-}"
+
+    if [ -z "$name" ]; then
+        name=$(pick_profile "Share sessions for") || exit 1
+    fi
+
+    if ! profile_exists "$name"; then
+        error "Profile '$name' does not exist."
+    fi
+
+    local dir
+    dir="$(profile_dir "$name")"
+
+    if [ -L "$dir/projects" ]; then
+        success "Sessions already shared for '$name'."
+        return
+    fi
+
+    if [ -d "$dir/projects" ]; then
+        warn "Profile '$name' has its own projects/ folder."
+        info "Moving existing sessions to backup..."
+        mv "$dir/projects" "$dir/projects.bak.$(date +%s)"
+    fi
+
+    ln -s "$CLAUDE_HOME/projects" "$dir/projects"
+    success "Sessions now shared for '$name'."
+    dim "All profiles can resume each other's sessions."
+    echo ""
+}
+
+cmd_help() {
+    print_header
+    printf "  ${BOLD}USAGE${RESET}\n"
+    printf "    $TOOL_NAME ${DIM}<profile> [claude-flags]${RESET}     Launch with any Claude flags\n"
+    printf "    $TOOL_NAME ${DIM}<command> [args]${RESET}             Manage profiles\n\n"
+
+    printf "  ${BOLD}COMMANDS${RESET}\n"
+    printf "    ${CYAN}create${RESET} ${DIM}[name]${RESET}       Create a profile (auto-shares sessions)\n"
+    printf "    ${CYAN}list${RESET}               Show all profiles + login & sharing status\n"
+    printf "    ${CYAN}delete${RESET} ${DIM}[name]${RESET}       Delete a profile\n"
+    printf "    ${CYAN}share${RESET} ${DIM}[name]${RESET}        Enable session sharing for a profile\n"
+    printf "    ${CYAN}status${RESET}             Show active Claude sessions\n"
+    printf "    ${CYAN}help${RESET}               Show this help\n"
+    printf "    ${CYAN}version${RESET}            Show version\n\n"
+
+    printf "  ${BOLD}EXAMPLES${RESET}\n"
+    printf "    ${DIM}$TOOL_NAME work${RESET}                  Launch work profile\n"
+    printf "    ${DIM}$TOOL_NAME work -r${RESET}               Resume a work session\n"
+    printf "    ${DIM}$TOOL_NAME work -c${RESET}               Continue latest work session\n"
+    printf "    ${DIM}$TOOL_NAME personal -p \"fix bug\"${RESET}  Print mode on personal\n"
+    printf "    ${DIM}$TOOL_NAME create work${RESET}            Create work profile\n"
+    printf "    ${DIM}$TOOL_NAME list${RESET}                   Show all profiles\n\n"
+
+    printf "  ${BOLD}WHEN YOU HIT THE LIMIT${RESET}\n"
+    printf "    ${DIM}1. Exit current session (Ctrl+D)${RESET}\n"
+    printf "    ${DIM}2. $TOOL_NAME <other-profile> -r${RESET}\n"
+    printf "    ${DIM}3. Pick the same session, keep going${RESET}\n\n"
+
+    printf "  ${BOLD}HOW IT WORKS${RESET}\n"
+    printf "    Each profile gets its own ~/.claude-<name>/ directory with\n"
+    printf "    isolated credentials but shared sessions. Skills, settings,\n"
+    printf "    and plugins are symlinked from ~/.claude/ — no duplication.\n\n"
+    printf "    ${DIM}Credentials:  isolated per profile (macOS Keychain)${RESET}\n"
+    printf "    ${DIM}Sessions:     shared via symlink to ~/.claude/projects/${RESET}\n"
+    printf "    ${DIM}Settings:     symlinked from ~/.claude/${RESET}\n"
+    echo ""
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+main() {
+    case "${1:-}" in
+        create)              shift; cmd_create "$@" ;;
+        list|ls)             shift; cmd_list "$@" ;;
+        delete|rm|remove)    shift; cmd_delete "$@" ;;
+        share)               shift; cmd_share "$@" ;;
+        status|ps)           shift; cmd_status "$@" ;;
+        launch|run|start)    shift; cmd_launch "$@" ;;
+        help|-h|--help)      cmd_help ;;
+        version|-v|--version) echo "$TOOL_NAME v$VERSION" ;;
+        "")
+            ensure_gum
+            print_header
+            local action
+            action=$(gum choose \
+                "Launch a profile" \
+                "Create a profile" \
+                "List profiles" \
+                "Delete a profile" \
+                "Show active sessions" \
+                "Exit")
+            case "$action" in
+                "Launch a profile")      cmd_launch ;;
+                "Create a profile")      cmd_create ;;
+                "List profiles")         cmd_list ;;
+                "Delete a profile")      cmd_delete ;;
+                "Show active sessions")  cmd_status ;;
+                "Exit"|"")               exit 0 ;;
+            esac
+            ;;
+        *)
+            # If arg matches a profile name, launch it (with remaining flags)
+            if profile_exists "$1"; then
+                cmd_launch "$@"
+            else
+                error "Unknown command or profile: $1. Run '$TOOL_NAME help' for usage."
+            fi
+            ;;
+    esac
+}
+
+main "$@"
