@@ -35,7 +35,16 @@ short_model() {
 MODEL_SHORT=$(short_model "$MODEL")
 
 # Terminal width
-COLS="${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
+COLS="${COLUMNS:-0}"
+if [ "$COLS" -eq 0 ]; then
+    COLS=$(tput cols 2>/dev/null || echo 0)
+fi
+if [ "$COLS" -eq 0 ]; then
+    COLS=$(stty size < /dev/tty 2>/dev/null | awk '{print $2}' || echo 0)
+fi
+if [ "$COLS" -eq 0 ]; then
+    COLS=120
+fi
 
 # Colors
 GREEN='\033[32m'
