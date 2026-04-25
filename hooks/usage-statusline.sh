@@ -35,16 +35,16 @@ short_model() {
 MODEL_SHORT=$(short_model "$MODEL")
 
 # Terminal width
-COLS="${COLUMNS:-0}"
-if [ "$COLS" -eq 0 ]; then
-    COLS=$(tput cols 2>/dev/null || echo 0)
-fi
-if [ "$COLS" -eq 0 ]; then
-    COLS=$(stty size < /dev/tty 2>/dev/null | awk '{print $2}' || echo 0)
-fi
-if [ "$COLS" -eq 0 ]; then
-    COLS=120
-fi
+# Layout mode (Claude Code doesn't pass terminal width — see issues #5430, #22115)
+# Override with: export CLAUDE_STATUSLINE_LAYOUT=wide|medium|narrow|tiny
+LAYOUT="${CLAUDE_STATUSLINE_LAYOUT:-wide}"
+case "$LAYOUT" in
+    wide)   COLS=130 ;;
+    medium) COLS=100 ;;
+    narrow) COLS=70 ;;
+    tiny)   COLS=50 ;;
+    *)      COLS=130 ;;
+esac
 
 # Colors
 GREEN='\033[32m'
