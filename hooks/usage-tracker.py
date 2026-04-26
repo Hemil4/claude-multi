@@ -39,18 +39,28 @@ def extract_usage_from_transcript(transcript_path):
     if not transcript_path or not os.path.exists(transcript_path):
         return None
 
-    # Read last 50KB to find recent usage entries
+    # Read last 50KB in binary mode to handle UTF-8 boundaries safely
     file_size = os.path.getsize(transcript_path)
     read_size = min(file_size, 50000)
 
     usage_entries = []
 
-    with open(transcript_path, "r") as f:
-        if file_size > read_size:
-            f.seek(file_size - read_size)
-            f.readline()  # skip partial line
+    try:
+        with open(transcript_path, "rb") as f:
+            if file_size > read_size:
+                f.seek(file_size - read_size)
 
-        for line in f:
+            data = f.read()
+
+        # Decode with error tolerance — partial multi-byte chars at start are OK
+        text = data.decode("utf-8", errors="ignore")
+        lines = text.split("\n")
+
+        # Skip first line if we seeked (might be partial)
+        if file_size > read_size and lines:
+            lines = lines[1:]
+
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -72,6 +82,8 @@ def extract_usage_from_transcript(transcript_path):
                     })
             except (json.JSONDecodeError, KeyError):
                 continue
+    except (IOError, OSError):
+        return None
 
     return usage_entries[-1] if usage_entries else None
 
